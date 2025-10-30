@@ -1,9 +1,8 @@
 # main.py
 # Lectura directa desde t.me/s/<channel> (sin proxy) + reenvío a destinos
-# Usa asyncio y python-telegram-bot (async send_message). Logs claros.
+# Usa asyncio y python-telegram-bot (async send_message). Logs claros y mensajes limpios.
 
 import os
-import time
 import asyncio
 import json
 import logging
@@ -21,7 +20,7 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "20"))  # segundos entre revisi
 STATE_FILE = "last_seen_web.json"
 # ----------------------------------------------------------
 
-# Frases a eliminar (solo se borran del texto, no descarta el mensaje completo)
+# Frases prohibidas (se eliminarán las líneas que las contengan)
 BAD_PHRASES = [
     "🚧 MAIN CHANNEL @pocketoptionai",
     "VIP BOT @pocketoption0o",
@@ -29,9 +28,11 @@ BAD_PHRASES = [
     "@unstoppable_trader VIP BOT",
     "🚧 BINOLLA FREE 1M 🚧",
     "@pocketoptionai",
-    "@pocketoption0o"
+    "@pocketoption0o",
+    "BINOLLA FREE 1M",
+    "MAIN CHANNEL",
+    "VIP BOT"
 ]
-
 BAD_RE = [re.compile(re.escape(p), flags=re.IGNORECASE) for p in BAD_PHRASES]
 
 # Logging
@@ -91,19 +92,17 @@ def fetch_posts(channel):
 
 
 def clean_text_keep_rest(text):
-    """Limpia frases bloqueadas y deja el texto bien formateado."""
-    new = text
-    for pat in BAD_RE:
-        new = pat.sub("", new)
-
-    # Quitar repeticiones de saltos o espacios
-    new = re.sub(r"\n{2,}", "\n", new)
-    new = re.sub(r" {2,}", " ", new)
-    new = new.strip()
-
-    # Asegurar que no queden líneas vacías
-    lines = [ln.strip() for ln in new.splitlines() if ln.strip()]
-    return "\n".join(lines)
+    # Elimina líneas con frases prohibidas y limpia saltos / espacios
+    cleaned_lines = []
+    for line in text.splitlines():
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+        if any(p.search(line_stripped) for p in BAD_RE):
+            continue
+        cleaned_lines.append(line_stripped)
+    # Unir todo en una sola línea limpia y fluida
+    return " ".join(cleaned_lines).strip()
 
 
 async def send_message_async(chat_id: int, text: str, msg_id=None):
