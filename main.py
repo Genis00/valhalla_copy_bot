@@ -1,9 +1,9 @@
 # ================================================================
-# Telegram Message Copier (versión estable para Railway)
+# Telegram Message Copier (v2) — Lectura desde web pública (sin BotFather en el canal origen)
 # Autor: ChatGPT para Genis Javier
 # Descripción:
-#   Copia automáticamente mensajes de texto desde un canal público
-#   y los reenvía a varios canales privados cada 60 segundos.
+#   Copia automáticamente mensajes desde un canal público (vía t.me/s)
+#   y los reenvía a varios canales privados configurados.
 # ================================================================
 
 import requests
@@ -13,27 +13,34 @@ import json
 import os
 from telegram import Bot
 
-# ---------------- CONFIGURACIÓN ----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Token del bot (desde variables Railway)
-SOURCE = "pocketoption0o"  # canal de origen (sin @)
-DEST_CHAT_IDS = [-1003202176280, -1003058100855]  # canales privados de salida
+# ---------------- CONFIGURACIÓN DESDE VARIABLES DE ENTORNO ----------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SOURCE = os.getenv("SOURCE", "pocketoption0o")  # Canal de origen SIN @
+DEST_IDS = os.getenv("DEST_IDS", "-1003202176280,-1003058100855")  # IDs separados por coma
 STATE_FILE = "last_seen.json"
 CHECK_INTERVAL = 60  # segundos entre revisiones
-# ------------------------------------------------
+# ---------------------------------------------------------------------------
 
-# Palabras o bloques de texto que deben eliminarse del mensaje
+# Mensajes o bloques que deben eliminarse del texto original
 TEXTS_TO_REMOVE = [
-    """🚧 POCKET 1M FREE 🚧
-CREATE ACCOUNT
-ADD ALL BOT https://t.me/addlist/9ze9Nw05g6UyYTVl
-JOIN MAIN CHANNEL @pocketoptionai"""
+    "🚧 POCKET 1M FREE 🚧",
+    "CREATE ACCOUNT",
+    "ADD ALL BOT https://t.me/addlist/9ze9Nw05g6UyYTVl",
+    "JOIN MAIN CHANNEL @pocketoptionai"
 ]
 
+# Línea de diagnóstico (para Railway)
+print("TOKEN DETECTADO:", BOT_TOKEN[:10] if BOT_TOKEN else "NO DETECTADO")
+
+# Validación del token
+if not BOT_TOKEN:
+    raise ValueError("❌ No se encontró la variable BOT_TOKEN. Verifica en Railway → Variables.")
+
+# Inicialización del bot
 bot = Bot(token=BOT_TOKEN)
 
 
 def load_state():
-    """Carga el último mensaje leído."""
     try:
         with open(STATE_FILE, "r") as f:
             return json.load(f)
@@ -42,13 +49,12 @@ def load_state():
 
 
 def save_state(state):
-    """Guarda el ID del último mensaje leído."""
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
 
 def fetch_posts(channel):
-    """Obtiene los mensajes públicos del canal a través de t.me/s"""
+    """Obtiene los mensajes del canal público desde t.me/s/<channel>"""
     url = f"https://t.me/s/{channel}"
     r = requests.get(url, timeout=20)
     r.raise_for_status()
@@ -68,7 +74,6 @@ def fetch_posts(channel):
         text_div = div.find("div", class_="tgme_widget_message_text")
         if not text_div:
             continue
-
         text = text_div.get_text("\n").strip()
         if not text:
             continue
@@ -79,7 +84,7 @@ def fetch_posts(channel):
 
 
 def clean_text(text):
-    """Elimina los bloques prohibidos del texto."""
+    """Elimina las líneas o fragmentos no deseados"""
     for bad in TEXTS_TO_REMOVE:
         text = text.replace(bad, "")
     return text.strip()
@@ -89,8 +94,10 @@ def main_loop():
     state = load_state()
     last_id = state.get("last_id", 0)
 
+    dest_list = [int(x) for x in DEST_IDS.split(",") if x.strip()]
+
     print(f"🚀 Bot iniciado — copiando desde: {SOURCE}")
-    print(f"📡 Destinos: {DEST_CHAT_IDS}")
+    print(f"📡 Canales destino: {dest_list}")
 
     while True:
         try:
@@ -101,10 +108,9 @@ def main_loop():
             for p in new_posts:
                 clean_msg = clean_text(p["text"])
                 if not clean_msg:
-                    continue  # ignorar vacíos o bloqueados
+                    continue
 
-                # Enviar a todos los canales de salida
-                for chat_id in DEST_CHAT_IDS:
+                for chat_id in dest_list:
                     try:
                         bot.send_message(chat_id=chat_id, text=clean_msg)
                         print(f"✅ Enviado a {chat_id}: {clean_msg[:40]}...")
