@@ -1,122 +1,117 @@
-import os
-import time
-import logging
+# ================================================================
+# Telegram Message Copier (sin sesión local)
+# Autor: ChatGPT para Genis Javier
+# Descripción:
+#   Copia automáticamente mensajes de texto desde un canal público
+#   y los reenvía a varios canales privados cada 60 segundos.
+# ================================================================
+
 import requests
+from bs4 import BeautifulSoup
+import time
+import json
 from telegram import Bot
-from telegram.error import TelegramError
 
-# -----------------------------------------
-# CONFIGURACIÓN INICIAL
-# -----------------------------------------
+# ---------------- CONFIGURACIÓN ----------------
+BOT_TOKEN = "TU_TOKEN_AQUI"  # ⚠️ Reemplázalo por el token del BotFather
+SOURCE = "pocketoption0o"  # canal de origen (sin @)
+DEST_CHAT_IDS = [-1003202176280, -1003058100855]  # canales privados de salida
+STATE_FILE = "last_seen.json"
+CHECK_INTERVAL = 60  # segundos entre revisiones
+# ------------------------------------------------
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-SOURCE = os.getenv("SOURCE")  # ejemplo: pocketoption0o
-DESTINATIONS = os.getenv("DESTINATIONS", "").split(",")
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
-
-if not BOT_TOKEN or not SOURCE or not DESTINATIONS:
-    logging.error("❌ Faltan variables de entorno BOT_TOKEN / SOURCE / DESTINATIONS.")
-    exit(1)
+# Palabras o bloques de texto que deben eliminarse
+TEXTS_TO_REMOVE = [
+    "🚧 POCKET 1M FREE 🚧\nCREATE ACCOUNT\nADD ALL BOT https://t.me/addlist/9ze9Nw05g6UyYTVl\nJOIN MAIN CHANNEL @pocketoptionai"
+]
 
 bot = Bot(token=BOT_TOKEN)
 
-# -----------------------------------------
-# BLOQUES DE TEXTO QUE SE ELIMINAN
-# -----------------------------------------
-TEXTS_TO_REMOVE = [
-    "🚧 MAIN CHANNEL @pocketoptionai",
-    "VIP BOT @pocketoption0o",
-    "Register here 🚧",
-    "🚧 POCKET 1M FREE 🚧",
-    "CREATE ACCOUNT",
-    "ADD ALL BOT https://t.me/addlist/9ze9Nw05g6UyYTVl",
-    "JOIN MAIN CHANNEL @pocketoptionai"
-]
 
-# -----------------------------------------
-# FUNCIONES DE UTILIDAD
-# -----------------------------------------
+def load_state():
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {"last_id": 0}
+
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
+def fetch_posts(channel):
+    """Obtiene los mensajes del canal público desde la web t.me/s"""
+    url = f"https://t.me/s/{channel}"
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    posts = []
+    for div in soup.find_all("div", class_="tgme_widget_message"):
+        a = div.find("a", class_="tgme_widget_message_date")
+        if not a:
+            continue
+        href = a.get("href", "")
+        try:
+            msg_id = int(href.strip("/").split("/")[-1])
+        except:
+            continue
+
+        text_div = div.find("div", class_="tgme_widget_message_text")
+        if not text_div:
+            continue
+        text = text_div.get_text("\n").strip()
+        if not text:
+            continue
+        posts.append({"id": msg_id, "text": text})
+
+    return posts
+
 
 def clean_text(text):
-    """Elimina cualquier línea que contenga una de las frases prohibidas."""
-    lines = text.splitlines()
-    clean_lines = [
-        line for line in lines
-        if not any(bad.lower() in line.lower() for bad in TEXTS_TO_REMOVE)
-    ]
-    return "\n".join(clean_lines).strip()
+    """Elimina las líneas no deseadas"""
+    for bad in TEXTS_TO_REMOVE:
+        text = text.replace(bad, "")
+    return text.strip()
 
 
-def get_latest_post(source):
-    """Lee el último mensaje público de un canal Telegram a través de t.me/s/..."""
-    try:
-        url = f"https://t.me/s/{source}"
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
-            logging.warning(f"⚠️ No se pudo acceder al canal: {source}")
-            return None, None
-
-        # Buscar el último mensaje visible (identificador del mensaje y texto)
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(response.text, "html.parser")
-        messages = soup.select(".tgme_widget_message_text")
-        ids = soup.select(".tgme_widget_message")
-        if not messages or not ids:
-            return None, None
-
-        last_id = ids[-1]["data-post"].split("/")[-1]
-        text = messages[-1].get_text("\n")
-        return last_id, text
-    except Exception as e:
-        logging.error(f"❌ Error al obtener mensaje de {source}: {e}")
-        return None, None
-
-
-def send_to_destinations(text, msg_id):
-    """Envía el texto a todos los canales destino."""
-    for chat_id in DESTINATIONS:
-        chat_id = chat_id.strip()
-        if not chat_id:
-            continue
-        try:
-            bot.send_message(chat_id=chat_id, text=text)
-            preview = text.replace("\n", " ")[:50]
-            logging.info(f"✅ Enviado a {chat_id}: id_msg={msg_id} preview='{preview}...'")
-        except TelegramError as e:
-            logging.error(f"⚠️ Error enviando a {chat_id}: {e}")
-
-
-# -----------------------------------------
-# LOOP PRINCIPAL
-# -----------------------------------------
-def main():
-    logging.info(f"🚀 Iniciado. SOURCE = {SOURCE} | Destinos: {DESTINATIONS} | Intervalo: {CHECK_INTERVAL}")
-
-    last_msg_id = None
+def main_loop():
+    state = load_state()
+    last_id = state.get("last_id", 0)
 
     while True:
-        msg_id, text = get_latest_post(SOURCE)
-        if not msg_id or not text:
+        try:
+            posts = fetch_posts(SOURCE)
+            new_posts = [p for p in posts if p["id"] > last_id]
+            new_posts.sort(key=lambda x: x["id"])
+
+            for p in new_posts:
+                clean_msg = clean_text(p["text"])
+                if not clean_msg:
+                    continue  # ignorar vacíos
+
+                # Enviar a todos los canales de salida
+                for chat_id in DEST_CHAT_IDS:
+                    try:
+                        bot.send_message(chat_id=chat_id, text=clean_msg)
+                        print(f"✅ Enviado a {chat_id}: {clean_msg[:40]}...")
+                    except Exception as e:
+                        print(f"⚠️ Error enviando a {chat_id}: {e}")
+
+                last_id = max(last_id, p["id"])
+                state["last_id"] = last_id
+                save_state(state)
+
             time.sleep(CHECK_INTERVAL)
-            continue
 
-        if msg_id != last_msg_id:
-            clean_msg = clean_text(text)
-            if clean_msg:
-                send_to_destinations(clean_msg, msg_id)
-                last_msg_id = msg_id
-            else:
-                logging.info(f"ℹ️ Mensaje {msg_id} limpiado completamente (solo texto bloqueado).")
-        else:
-            logging.debug("⏳ Sin nuevos mensajes.")
-
-        time.sleep(CHECK_INTERVAL)
+        except Exception as e:
+            print("❌ Error general:", e)
+            time.sleep(15)
 
 
 if __name__ == "__main__":
-    main()
+    print("🚀 Bot iniciado — copiando desde:", SOURCE)
+    main_loop()
