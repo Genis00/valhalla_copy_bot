@@ -30,7 +30,7 @@ BAD_PHRASES = [
     "@pocketoptionai",
     "@pocketoption0o",
 "@unstoppable_trader",
-"🚧🚧",
+"🚧",
     "BINOLLA FREE 1M",
     "MAIN CHANNEL",
     "VIP BOT"
