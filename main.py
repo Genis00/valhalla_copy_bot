@@ -1,59 +1,167 @@
-import logging
-from telethon import TelegramClient, events
-import re
+# main.py
+# Lectura directa desde t.me/s/<channel> (sin proxy) + reenvío a destinos
+# Usa asyncio y python-telegram-bot (async send_message). Logs claros.
+
+import os
+import time
 import asyncio
+import json
+import logging
+import re
+import requests
+from bs4 import BeautifulSoup
+from telegram import Bot
+from telegram.error import TelegramError
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# ---------------- CONFIG desde ENV (Railway) ----------------
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+SOURCE_CHANNELS = [s.strip() for s in os.getenv("SOURCE_CHANNELS", "binollaofficiall,pocketoptionbotm1").split(",") if s.strip()]
+DEST_IDS = [int(x.strip()) for x in os.getenv("DEST_IDS", "-1003202176280,-1003058100855").split(",") if x.strip()]
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "20"))  # segundos entre revisiones
+STATE_FILE = "last_seen_web.json"
+# ----------------------------------------------------------
 
-api_id = 12345678  # tu API ID
-api_hash = "tu_api_hash"
-session_name = "valhalla_copy_bot"
-
-# canales origen y destino
-origen = [-1003850180555]
-destinos = [-1003201762088]
-
-# frases bloqueadas (se eliminarán, no el mensaje completo)
-frases_bloqueadas = [
-    "Mention time",
-    "trade start time",
-    "STEP MART",
-    "avoid this for low payout",
-    "trade can close",
-    "check accuracy",
-    "join in",
-    "public group",
-    "secure"
+# Frases a eliminar (solo se borran del texto, no descarta el mensaje completo)
+BAD_PHRASES = [
+    "🚧 MAIN CHANNEL @pocketoptionai",
+    "VIP BOT @pocketoption0o",
+    "Register here 🚧",
+    "@unstoppable_trader VIP BOT",
+    "🚧 BINOLLA FREE 1M 🚧",
+    "@pocketoptionai",
+    "@pocketoption0o"
 ]
 
-client = TelegramClient(session_name, api_id, api_hash)
+BAD_RE = [re.compile(re.escape(p), flags=re.IGNORECASE) for p in BAD_PHRASES]
 
-def limpiar_texto(texto):
-    for frase in frases_bloqueadas:
-        texto = re.sub(frase, "", texto, flags=re.IGNORECASE)
-    # Elimina espacios o saltos sobrantes
-    return re.sub(r"\n{2,}", "\n", texto.strip())
+# Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("web-copier")
 
-@client.on(events.NewMessage(chats=origen))
-async def handler(event):
-    texto = event.raw_text
-    texto_limpio = limpiar_texto(texto)
+if not BOT_TOKEN:
+    log.error("❌ BOT_TOKEN no está configurado en variables de entorno.")
+    raise SystemExit(1)
 
-    if not texto_limpio.strip():
-        logging.info(f"Mensaje vacío tras limpieza, ignorado: {texto}")
+bot = Bot(token=BOT_TOKEN)
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {ch: 0 for ch in SOURCE_CHANNELS}
+
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.warning("No se pudo guardar estado: %s", e)
+
+
+def fetch_posts(channel):
+    url = f"https://t.me/s/{channel}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        r = requests.get(url, timeout=15, headers=headers)
+        r.raise_for_status()
+    except Exception as e:
+        log.warning("⚠️ Error leyendo canal %s: %s", channel, e)
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    posts = []
+    for div in soup.find_all("div", class_="tgme_widget_message"):
+        a = div.find("a", class_="tgme_widget_message_date")
+        if not a:
+            continue
+        href = a.get("href", "")
+        try:
+            msg_id = int(href.strip("/").split("/")[-1])
+        except:
+            continue
+        text_div = div.find("div", class_="tgme_widget_message_text")
+        text = text_div.get_text("\n", strip=True) if text_div else ""
+        if text:
+            posts.append({"id": msg_id, "text": text})
+    posts.sort(key=lambda x: x["id"])
+    return posts
+
+
+def clean_text_keep_rest(text):
+    """Limpia frases bloqueadas y deja el texto bien formateado."""
+    new = text
+    for pat in BAD_RE:
+        new = pat.sub("", new)
+
+    # Quitar repeticiones de saltos o espacios
+    new = re.sub(r"\n{2,}", "\n", new)
+    new = re.sub(r" {2,}", " ", new)
+    new = new.strip()
+
+    # Asegurar que no queden líneas vacías
+    lines = [ln.strip() for ln in new.splitlines() if ln.strip()]
+    return "\n".join(lines)
+
+
+async def send_message_async(chat_id: int, text: str, msg_id=None):
+    try:
+        await bot.send_message(chat_id=chat_id, text=text)
+        log.info("✅ Enviado a %s: id_msg=%s preview='%s'", chat_id, msg_id, text[:80].replace("\n", " "))
+    except TelegramError as e:
+        log.error("❌ Error enviando a %s (id_msg=%s): %s", chat_id, msg_id, e)
+    except Exception as e:
+        log.error("❌ Error inesperado enviando a %s (id_msg=%s): %s", chat_id, msg_id, e)
+
+
+async def process_channel(channel, state):
+    posts = fetch_posts(channel)
+    if not posts:
+        log.debug("No posts leídos para %s", channel)
         return
 
-    for destino in destinos:
+    last = int(state.get(channel, 0))
+    new_posts = [p for p in posts if p["id"] > last]
+    if not new_posts:
+        log.debug("No hay posts nuevos en %s (last=%s)", channel, last)
+        return
+
+    for p in new_posts:
+        raw = p["text"]
+        cleaned = clean_text_keep_rest(raw)
+        if not cleaned:
+            log.info("🚫 Tras limpiar, no queda contenido útil en %s id=%s", channel, p["id"])
+        else:
+            for dest in DEST_IDS:
+                await send_message_async(dest, cleaned, msg_id=p["id"])
+                await asyncio.sleep(0.4)
+        state[channel] = p["id"]
+        save_state(state)
+
+
+async def main_loop():
+    log.info("🚀 Web-copier iniciado (leerán %s). Intervalo %s s", SOURCE_CHANNELS, CHECK_INTERVAL)
+    state = load_state()
+    for ch in SOURCE_CHANNELS:
+        state.setdefault(ch, 0)
+
+    while True:
         try:
-            await client.send_message(destino, texto_limpio)
-            logging.info(f"✅ Enviado a {destino}: {texto_limpio[:40]}")
+            for ch in SOURCE_CHANNELS:
+                await process_channel(ch, state)
+            await asyncio.sleep(CHECK_INTERVAL)
         except Exception as e:
-            logging.error(f"Error enviando a {destino}: {e}")
+            log.exception("❌ Error general en main loop: %s", e)
+            await asyncio.sleep(10)
 
-async def main():
-    await client.start()
-    logging.info("🤖 Bot iniciado y escuchando...")
-    await asyncio.Future()
 
-with client:
-    client.loop.run_until_complete(main())
+if __name__ == "__main__":
+    try:
+        asyncio.run(main_loop())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.create_task(main_loop())
+        loop.run_forever()
