@@ -2,67 +2,48 @@ import os
 import time
 import requests
 from bs4 import BeautifulSoup
-from telegram import Bot
 
-# =============================
-# 🔧 VARIABLES DE CONFIGURACIÓN
-# =============================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-SOURCE_CHANNEL = "pocketoption0o"  # sin @
-TARGET_CHANNELS = [-1003202176280, -1003058100855]  # lista de IDs destino
+# Variables de entorno de Railway (no necesitas cambiarlas)
+SOURCE = os.getenv("SOURCE", "pocketoption0o")
 
-# =============================
-# 🚀 INICIALIZACIÓN DEL BOT
-# =============================
-bot = Bot(token=BOT_TOKEN)
-print(f"TOKEN DETECTADO: {BOT_TOKEN[:8]}")
-print(f"🚀 Bot iniciado — copiando desde: {SOURCE_CHANNEL}")
-print(f"📡 Canales destino: {TARGET_CHANNELS}")
-
-# =============================
-# ⚙️ FUNCIONES
-# =============================
-last_message_text = ""
-
-def get_latest_message():
-    """Lee el mensaje más reciente del canal público usando t.me/s/<canal>"""
-    url = f"https://t.me/s/{SOURCE_CHANNEL}"
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    all_msgs = soup.find_all("div", {"class": "tgme_widget_message_text"})
-
-    if not all_msgs:
-        return None
-
-    # Tomar el texto del último mensaje
-    last_msg = all_msgs[-1].get_text("\n", strip=True)
-    return last_msg
-
-
-def send_to_targets(text):
-    """Envía un texto a todos los canales destino"""
-    for chat_id in TARGET_CHANNELS:
-        try:
-            bot.send_message(chat_id=chat_id, text=text)
-            print(f"✅ Enviado a {chat_id}")
-        except Exception as e:
-            print(f"⚠️ Error enviando a {chat_id}: {e}")
-
-
-# =============================
-# 🔁 LOOP PRINCIPAL
-# =============================
-print("🕓 Esperando mensajes nuevos...")
-while True:
+def obtener_mensajes_web(source_username):
+    """Lee los últimos mensajes del canal público vía web"""
+    url = f"https://t.me/s/{source_username}"
     try:
-        message = get_latest_message()
-        if message and message != last_message_text:
-            print(f"📩 Nuevo mensaje detectado:\n{message}\n")
-            send_to_targets(message)
-            last_message_text = message
-        time.sleep(10)
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Telegram usa <div class="tgme_widget_message_text"> para el texto
+        mensajes_html = soup.find_all("div", class_="tgme_widget_message_text")
+        mensajes = [m.get_text("\n", strip=True) for m in mensajes_html]
+
+        return mensajes[-5:]  # devolvemos los últimos 5 mensajes
     except Exception as e:
-        print(f"⚠️ Error: {e}")
-        time.sleep(15)
+        print(f"⚠️ Error al leer desde la web: {e}")
+        return []
+
+if __name__ == "__main__":
+    print(f"🌐 Leyendo canal público: {SOURCE}")
+    print("📡 Esperando y mostrando los últimos mensajes...\n")
+
+    mensajes_previos = []
+
+    while True:
+        nuevos = obtener_mensajes_web(SOURCE)
+
+        if nuevos:
+            # Compara con los mensajes anteriores
+            nuevos_detectados = [m for m in nuevos if m not in mensajes_previos]
+            if nuevos_detectados:
+                print("📩 Nuevos mensajes detectados:")
+                for msg in nuevos_detectados:
+                    print("────────────────────────────")
+                    print(msg)
+                print("────────────────────────────\n")
+
+                mensajes_previos = nuevos
+        else:
+            print("⚠️ No se pudieron obtener mensajes (canal inaccesible o vacío)")
+
+        time.sleep(20)  # cada 20 segundos
