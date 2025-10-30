@@ -1,29 +1,20 @@
-# ================================================================
-# Telegram multi-source copier (sin proxy, directo desde t.me/s/)
-# Lee canales públicos y reenvía los mensajes filtrados a tus grupos/canales destino
-# ================================================================
-
 import os
-import time
-import json
-import requests
-from bs4 import BeautifulSoup
+import asyncio
 from telegram import Bot
 from telegram.error import TelegramError
+import aiohttp
+import html
+import re
 
-# ---------------------------
-# CONFIGURACIÓN PRINCIPAL
-# ---------------------------
+# ======================
+# CONFIGURACIÓN
+# ======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SOURCE_CHANNELS = os.getenv("SOURCE_CHANNELS", "binollaofficiall,pocketoptionbotm1")
-DEST_IDS = os.getenv("DEST_IDS", "-1003202176280,-1003058100855")
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "25"))
-STATE_FILE = "last_seen.json"
+SOURCE_CHANNELS = os.getenv("SOURCE_CHANNELS", "binollaofficiall,pocketoptionbotm1").split(",")
+DEST_IDS = [int(x.strip()) for x in os.getenv("DEST_IDS", "").split(",") if x.strip()]
 
-# ---------------------------
-# Textos prohibidos que deben eliminarse del mensaje
-# ---------------------------
-TEXTS_TO_REMOVE = [
+# Textos prohibidos
+BLOCKED_PATTERNS = [
     "🚧 MAIN CHANNEL @pocketoptionai",
     "VIP BOT @pocketoption0o",
     "Register here 🚧",
@@ -31,122 +22,66 @@ TEXTS_TO_REMOVE = [
     "🚧 BINOLLA FREE 1M 🚧"
 ]
 
-# ---------------------------
-# Inicialización
-# ---------------------------
-if not BOT_TOKEN:
-    raise ValueError("❌ Falta el BOT_TOKEN en las variables de entorno.")
+# ======================
+# FUNCIONES
+# ======================
 
-SOURCE_CHANNELS = [s.strip() for s in SOURCE_CHANNELS.split(",") if s.strip()]
-DEST_IDS = [int(x.strip()) for x in DEST_IDS.split(",") if x.strip()]
-bot = Bot(token=BOT_TOKEN)
+async def fetch_latest_messages(channel_username):
+    """Obtiene los últimos mensajes de un canal público desde la web de Telegram"""
+    url = f"https://t.me/s/{channel_username}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                print(f"⚠️ Error al leer {channel_username}: {resp.status}")
+                return []
 
-print("✅ BOT iniciado")
-print("📥 Canales origen:", SOURCE_CHANNELS)
-print("📤 Canales destino:", DEST_IDS)
-print("⏱ Intervalo de lectura:", CHECK_INTERVAL, "segundos\n")
-
-
-# ---------------------------
-# Funciones de utilidad
-# ---------------------------
-def load_state():
-    """Carga el último ID enviado por canal."""
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
+            html_content = await resp.text()
+            # Extraer mensajes simples (texto plano) de la web pública
+            pattern = re.compile(r'<div class="tgme_widget_message_text js-message_text" dir="auto">(.*?)</div>', re.S)
+            messages = pattern.findall(html_content)
+            clean_messages = [html.unescape(re.sub(r"<.*?>", "", msg)).strip() for msg in messages]
+            return clean_messages[-5:]  # Últimos 5 mensajes
 
 
-def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-
-
-def clean_text(text):
-    """Elimina las líneas prohibidas del mensaje."""
-    for bad in TEXTS_TO_REMOVE:
-        text = text.replace(bad, "")
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return "\n".join(lines).strip()
-
-
-def fetch_posts(channel):
-    """Lee directamente desde https://t.me/s/<canal>"""
-    url = f"https://t.me/s/{channel}"
-    try:
-        response = requests.get(url, timeout=15, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        })
-        response.raise_for_status()
-    except Exception as e:
-        print(f"⚠️ Error leyendo {channel}: {e}")
-        return []
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    posts = []
-
-    for div in soup.find_all("div", class_="tgme_widget_message"):
-        # obtener id
-        a = div.find("a", class_="tgme_widget_message_date")
-        if not a:
-            continue
-        href = a.get("href", "")
+async def send_to_destinations(bot, text):
+    """Envía un mensaje a todos los canales destino"""
+    for dest in DEST_IDS:
         try:
-            msg_id = int(href.strip("/").split("/")[-1])
-        except:
-            continue
-
-        # obtener texto del mensaje
-        text_div = div.find("div", class_="tgme_widget_message_text")
-        text = text_div.get_text("\n", strip=True) if text_div else ""
-
-        if text:
-            posts.append({"id": msg_id, "text": text})
-
-    posts.sort(key=lambda x: x["id"])
-    return posts
-
-
-def send_to_destinations(text):
-    """Envía el texto limpio a todos los destinos configurados."""
-    for chat_id in DEST_IDS:
-        try:
-            bot.send_message(chat_id=chat_id, text=text)
-            print(f"✅ Enviado a {chat_id}: {text[:60]}...")
+            await bot.send_message(chat_id=dest, text=text)
+            await asyncio.sleep(0.8)
         except TelegramError as e:
-            print(f"⚠️ Error enviando a {chat_id}: {e}")
+            print(f"❌ Error enviando a {dest}: {e}")
 
 
-# ---------------------------
-# Loop principal
-# ---------------------------
-def main_loop():
-    state = load_state()
-    for ch in SOURCE_CHANNELS:
-        if ch not in state:
-            state[ch] = 0
+async def main():
+    print("🚀 Iniciando bot de copia directa (sin proxy)...")
+    print(f"📡 Canales origen: {SOURCE_CHANNELS}")
+    print(f"🎯 Canales destino: {DEST_IDS}")
+
+    bot = Bot(token=BOT_TOKEN)
+    last_messages = {ch: [] for ch in SOURCE_CHANNELS}
 
     while True:
-        for ch in SOURCE_CHANNELS:
-            posts = fetch_posts(ch)
-            if not posts:
-                continue
+        for channel in SOURCE_CHANNELS:
+            try:
+                messages = await fetch_latest_messages(channel)
+                if not messages:
+                    print(f"⚠️ Sin mensajes en {channel}")
+                    continue
 
-            new_posts = [p for p in posts if p["id"] > state.get(ch, 0)]
-            if not new_posts:
-                continue
+                new_msgs = [m for m in messages if m not in last_messages[channel]]
+                if new_msgs:
+                    for msg in new_msgs:
+                        if not any(blocked in msg for blocked in BLOCKED_PATTERNS):
+                            await send_to_destinations(bot, msg)
+                            print(f"✅ Copiado desde {channel}: {msg[:50]}...")
+                        else:
+                            print(f"🚫 Filtrado mensaje de {channel}")
+                    last_messages[channel] = messages
+            except Exception as e:
+                print(f"❗ Error procesando {channel}: {e}")
 
-            for p in new_posts:
-                cleaned = clean_text(p["text"])
-                if cleaned:
-                    send_to_destinations(cleaned)
-                    state[ch] = p["id"]
-                    save_state(state)
-
-        time.sleep(CHECK_INTERVAL)
-
+        await asyncio.sleep(30)  # espera entre ciclos
 
 if __name__ == "__main__":
-    main_loop()
+    asyncio.run(main())
