@@ -1,132 +1,68 @@
-# ================================================================
-# Telegram Message Copier (v2) — Lectura desde web pública (sin BotFather en el canal origen)
-# Autor: ChatGPT para Genis Javier
-# Descripción:
-#   Copia automáticamente mensajes desde un canal público (vía t.me/s)
-#   y los reenvía a varios canales privados configurados.
-# ================================================================
-
+import os
+import time
 import requests
 from bs4 import BeautifulSoup
-import time
-import json
-import os
 from telegram import Bot
 
-# ---------------- CONFIGURACIÓN DESDE VARIABLES DE ENTORNO ----------------
+# =============================
+# 🔧 VARIABLES DE CONFIGURACIÓN
+# =============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SOURCE = os.getenv("SOURCE", "pocketoption0o")  # Canal de origen SIN @
-DEST_IDS = os.getenv("DEST_IDS", "-1003202176280,-1003058100855")  # IDs separados por coma
-STATE_FILE = "last_seen.json"
-CHECK_INTERVAL = 60  # segundos entre revisiones
-# ---------------------------------------------------------------------------
+SOURCE_CHANNEL = "pocketoption0o"  # sin @
+TARGET_CHANNELS = [-1003202176280, -1003058100855]  # lista de IDs destino
 
-# Mensajes o bloques que deben eliminarse del texto original
-TEXTS_TO_REMOVE = [
-    "🚧 POCKET 1M FREE 🚧",
-    "CREATE ACCOUNT",
-    "ADD ALL BOT https://t.me/addlist/9ze9Nw05g6UyYTVl",
-    "JOIN MAIN CHANNEL @pocketoptionai"
-]
-
-# Línea de diagnóstico (para Railway)
-print("TOKEN DETECTADO:", BOT_TOKEN[:10] if BOT_TOKEN else "NO DETECTADO")
-
-# Validación del token
-if not BOT_TOKEN:
-    raise ValueError("❌ No se encontró la variable BOT_TOKEN. Verifica en Railway → Variables.")
-
-# Inicialización del bot
+# =============================
+# 🚀 INICIALIZACIÓN DEL BOT
+# =============================
 bot = Bot(token=BOT_TOKEN)
+print(f"TOKEN DETECTADO: {BOT_TOKEN[:8]}")
+print(f"🚀 Bot iniciado — copiando desde: {SOURCE_CHANNEL}")
+print(f"📡 Canales destino: {TARGET_CHANNELS}")
+
+# =============================
+# ⚙️ FUNCIONES
+# =============================
+last_message_text = ""
+
+def get_latest_message():
+    """Lee el mensaje más reciente del canal público usando t.me/s/<canal>"""
+    url = f"https://t.me/s/{SOURCE_CHANNEL}"
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    all_msgs = soup.find_all("div", {"class": "tgme_widget_message_text"})
+
+    if not all_msgs:
+        return None
+
+    # Tomar el texto del último mensaje
+    last_msg = all_msgs[-1].get_text("\n", strip=True)
+    return last_msg
 
 
-def load_state():
-    try:
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {"last_id": 0}
-
-
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
-
-def fetch_posts(channel):
-    """Obtiene los mensajes del canal público desde t.me/s/<channel>"""
-    url = f"https://t.me/s/{channel}"
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    posts = []
-    for div in soup.find_all("div", class_="tgme_widget_message"):
-        a = div.find("a", class_="tgme_widget_message_date")
-        if not a:
-            continue
-        href = a.get("href", "")
+def send_to_targets(text):
+    """Envía un texto a todos los canales destino"""
+    for chat_id in TARGET_CHANNELS:
         try:
-            msg_id = int(href.strip("/").split("/")[-1])
-        except:
-            continue
-
-        text_div = div.find("div", class_="tgme_widget_message_text")
-        if not text_div:
-            continue
-        text = text_div.get_text("\n").strip()
-        if not text:
-            continue
-
-        posts.append({"id": msg_id, "text": text})
-
-    return posts
-
-
-def clean_text(text):
-    """Elimina las líneas o fragmentos no deseados"""
-    for bad in TEXTS_TO_REMOVE:
-        text = text.replace(bad, "")
-    return text.strip()
-
-
-def main_loop():
-    state = load_state()
-    last_id = state.get("last_id", 0)
-
-    dest_list = [int(x) for x in DEST_IDS.split(",") if x.strip()]
-
-    print(f"🚀 Bot iniciado — copiando desde: {SOURCE}")
-    print(f"📡 Canales destino: {dest_list}")
-
-    while True:
-        try:
-            posts = fetch_posts(SOURCE)
-            new_posts = [p for p in posts if p["id"] > last_id]
-            new_posts.sort(key=lambda x: x["id"])
-
-            for p in new_posts:
-                clean_msg = clean_text(p["text"])
-                if not clean_msg:
-                    continue
-
-                for chat_id in dest_list:
-                    try:
-                        bot.send_message(chat_id=chat_id, text=clean_msg)
-                        print(f"✅ Enviado a {chat_id}: {clean_msg[:40]}...")
-                    except Exception as e:
-                        print(f"⚠️ Error enviando a {chat_id}: {e}")
-
-                last_id = max(last_id, p["id"])
-                state["last_id"] = last_id
-                save_state(state)
-
-            time.sleep(CHECK_INTERVAL)
-
+            bot.send_message(chat_id=chat_id, text=text)
+            print(f"✅ Enviado a {chat_id}")
         except Exception as e:
-            print("❌ Error general:", e)
-            time.sleep(15)
+            print(f"⚠️ Error enviando a {chat_id}: {e}")
 
 
-if __name__ == "__main__":
-    main_loop()
+# =============================
+# 🔁 LOOP PRINCIPAL
+# =============================
+print("🕓 Esperando mensajes nuevos...")
+while True:
+    try:
+        message = get_latest_message()
+        if message and message != last_message_text:
+            print(f"📩 Nuevo mensaje detectado:\n{message}\n")
+            send_to_targets(message)
+            last_message_text = message
+        time.sleep(10)
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+        time.sleep(15)
