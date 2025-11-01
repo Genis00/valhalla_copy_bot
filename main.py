@@ -29,6 +29,8 @@ BAD_PHRASES = [
     "🚧 BINOLLA FREE 1M 🚧",
     "@pocketoptionai",
     "@pocketoption0o",
+"here",
+"Register here",
 "@unstoppable_trader",
 "🚧",
     "BINOLLA FREE 1M",
