@@ -38,7 +38,6 @@ BAD_PHRASES = [
 "DM",
 "Add All Bot",
 "Add",
-"All",
 "🔗",
 "here",
 "Register here",
